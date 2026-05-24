@@ -4,6 +4,7 @@ import sys
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (issue #771)
 import argparse
 import math
 import re
@@ -84,7 +85,6 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
         prompts = batch["prompt"]  # list[str], length B
         enc = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=args.max_seq_len,
                         padding_side="left").to(args.device)  # input_ids: [B, P], attention_mask: [B, P]
-        prompt_length = enc.input_ids.shape[1]
 
         rollout_result = rollout_engine.rollout(
             prompt_ids=enc.input_ids,
@@ -94,7 +94,10 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
             temperature=0.8,
         )
         gen_out = rollout_result.output_ids
+        completion_ids = rollout_result.completion_ids
+        prompt_lens = rollout_result.prompt_lens.to(args.device)
         responses_text = rollout_result.completions
+        old_resp_logp = rollout_result.per_token_logps.to(args.device)
         rewards = calculate_rewards(prompts, responses_text, reward_model)  # [B]
 
         if args.debug_mode and is_main_process() and step % args.debug_interval == 0:
@@ -104,7 +107,7 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
                 Logger(f"{'=' * 30} [DEBUG] sample[{i}] CONTEXT_BEGIN {'=' * 30}")
                 Logger(prompts[i])
                 Logger(f"{'=' * 31} [DEBUG] sample[{i}] CONTEXT_END {'=' * 31}")
-                Logger(f"[DEBUG] prompt_len={prompt_length}, response_len={len(responses_text[i])}")
+                Logger(f"[DEBUG] prompt_len={prompt_lens[i].item()}, response_len={len(responses_text[i])}")
                 Logger(f"{'=' * 28} [DEBUG] sample[{i}] RESPONSE_BEGIN {'=' * 28}")
                 Logger(responses_text[i])
                 Logger(f"{'=' * 29} [DEBUG] sample[{i}] RESPONSE_END {'=' * 29}")
@@ -113,14 +116,12 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
 
         full_mask = (gen_out != tokenizer.pad_token_id).long()  # [B, P+R]
         labels = gen_out[:, 1:].clone()  # [B, P+R-1]
-        seq_len, resp_start = gen_out.size(1) - 1, prompt_length - 1
-        resp_mask = torch.arange(seq_len, device=gen_out.device).unsqueeze(0) >= resp_start
-        final_mask = (resp_mask & (~labels.eq(tokenizer.pad_token_id))).float()  # [B, P+R-1]
         B = len(prompts)
-        resp_labels = labels[:, resp_start:]  # [B, R]
+        resp_labels = completion_ids
         resp_idx = torch.arange(resp_labels.size(1), device=gen_out.device).unsqueeze(0)
-        resp_pad_mask = ~resp_labels.eq(tokenizer.pad_token_id)
-        resp_lengths = resp_pad_mask.sum(dim=1); eos_mask = resp_labels.eq(tokenizer.eos_token_id) & resp_pad_mask
+        logp_pos = prompt_lens.unsqueeze(1) - 1 + resp_idx
+        resp_pad_mask = rollout_result.completion_mask.to(args.device).bool()
+        resp_lengths = resp_pad_mask.sum(dim=1); valid_resp = resp_lengths > 0; eos_mask = resp_labels.eq(tokenizer.eos_token_id) & resp_pad_mask
         has_eos = eos_mask.any(dim=1); eos_pos = torch.argmax(eos_mask.int(), dim=1)
         resp_lengths = torch.where(has_eos, eos_pos + 1, resp_lengths).long().clamp(min=1)
         resp_policy_mask = ((resp_idx < resp_lengths.unsqueeze(1)) & resp_pad_mask).float()
@@ -129,19 +130,12 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
         with torch.no_grad():  # Rollout阶段只需推理获取old_logp和old_values，切断梯度省显存
             critic_for_rollout = critic_model.module if isinstance(critic_model, DistributedDataParallel) else critic_model
             values_seq = critic_for_rollout(input_ids=gen_out, attention_mask=full_mask)
-            old_resp_values = values_seq[:, resp_start:-1] * resp_value_mask
+            old_resp_values = values_seq.gather(1, logp_pos) * resp_value_mask
             
-            actor_for_rollout = actor_model.module if isinstance(actor_model, DistributedDataParallel) else actor_model
-            with autocast_ctx:
-                logits = actor_for_rollout(input_ids=gen_out, attention_mask=full_mask).logits
-            
-            old_resp_logp = F.log_softmax(logits[:, :-1], dim=-1).gather(2, labels.unsqueeze(-1)).squeeze(-1)[:, resp_start:]
-            
-            ref_logp_all = F.log_softmax(ref_model(input_ids=gen_out, attention_mask=full_mask).logits[:, :-1], dim=-1).gather(2, labels.unsqueeze(-1)).squeeze(-1)
-            ref_resp_logp = ref_logp_all[:, resp_start:]
+            ref_resp_logp = F.log_softmax(ref_model(input_ids=gen_out, attention_mask=full_mask).logits[:, :-1], dim=-1).gather(2, labels.unsqueeze(-1)).squeeze(-1).gather(1, logp_pos)
             token_rewards = torch.zeros_like(old_resp_logp)
             last_idx = resp_lengths - 1  # [B]
-            token_rewards[torch.arange(B, device=args.device), last_idx] += rewards  # 末尾加外部奖励
+            token_rewards[torch.arange(B, device=args.device)[valid_resp], last_idx[valid_resp]] += rewards[valid_resp]  # 末尾加外部奖励
 
             gen_len = old_resp_values.size(1); lastgaelam = torch.zeros(B, device=args.device); advs_rev = []
             for t in reversed(range(gen_len)):
@@ -175,14 +169,13 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
                 inds = b_inds[i:i + mb_size]
                 
                 mb_values_seq = critic_unwrapped(input_ids=gen_out[inds], attention_mask=full_mask[inds])
-                mb_resp_values = mb_values_seq[:, resp_start:-1]
+                mb_resp_values = mb_values_seq.gather(1, logp_pos[inds])
 
                 with autocast_ctx:
                     res = actor_unwrapped(input_ids=gen_out[inds], attention_mask=full_mask[inds])
                     aux_loss = res.aux_loss if lm_config.use_moe else torch.tensor(0.0, device=args.device)
 
-                mb_logp_all = F.log_softmax(res.logits[:, :-1], dim=-1).gather(2, labels[inds].unsqueeze(-1)).squeeze(-1)
-                mb_resp_logp = mb_logp_all[:, resp_start:]
+                mb_resp_logp = F.log_softmax(res.logits[:, :-1], dim=-1).gather(2, labels[inds].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos[inds])
                 
                 log_ratio = mb_resp_logp - old_resp_logp[inds]
                 approx_kl = (0.5 * (log_ratio ** 2) * resp_policy_mask[inds]).sum() / resp_policy_mask[inds].sum().clamp(min=1)
@@ -250,7 +243,7 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
             actor_optimizer.zero_grad()
             critic_optimizer.zero_grad()
         
-        if is_main_process() and step % args.save_interval == 0: rollout_engine.update_policy(actor_model)
+        if step % args.save_interval == 0 or step == iters: rollout_engine.update_policy(actor_model)
 
         if is_main_process():
             critic_loss_val = value_loss_sum / max(log_count, 1)
@@ -295,9 +288,9 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
             actor_model.train()
             del actor_state
 
-        del enc, gen_out, responses_text, rewards, full_mask, values_seq, advantages
-        del logits, labels, final_mask, resp_labels, resp_idx, resp_pad_mask, eos_mask, has_eos, eos_pos, resp_lengths, resp_policy_mask, resp_value_mask, old_resp_logp, ref_logp_all, ref_resp_logp
-        del kl, kl_ref, policy_loss, value_loss, loss, token_rewards, returns, old_resp_values
+        del enc, gen_out, completion_ids, responses_text, rewards, full_mask, values_seq, advantages
+        del labels, resp_labels, resp_idx, resp_pad_mask, valid_resp, eos_mask, has_eos, eos_pos, resp_lengths, resp_policy_mask, resp_value_mask, old_resp_logp, ref_resp_logp
+        del kl, kl_ref, policy_loss, value_loss, loss, token_rewards, returns, old_resp_values, prompt_lens, logp_pos
 
 
 if __name__ == "__main__":
@@ -339,8 +332,8 @@ if __name__ == "__main__":
     parser.add_argument("--debug_mode", action="store_true", help="是否打印训练调试采样")
     parser.add_argument("--debug_interval", type=int, default=20, help="debug模式下每隔多少step打印一次采样")
     parser.add_argument("--thinking_ratio", type=float, default=0.9, help="按概率开启thinking（0.0~1.0）")
-    parser.add_argument("--rollout_engine", type=str, default="sglang", choices=["torch", "sglang"], help="rollout引擎类型")
-    parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8997", help="SGLang服务器URL")
+    parser.add_argument("--rollout_engine", type=str, default="torch", choices=["torch", "sglang"], help="rollout引擎类型")
+    parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8998", help="SGLang服务器URL")
     parser.add_argument("--sglang_model_path", type=str, default="../model", help="SGLang tokenizer路径")
     parser.add_argument("--sglang_shared_path", type=str, default="./sglang_ckpt_ppo", help="SGLang共享存储路径")
     args = parser.parse_args()
@@ -421,11 +414,9 @@ if __name__ == "__main__":
         Logger('torch.compile enabled')
         rollout_engine.update_policy(actor_model)
     if dist.is_initialized():
-        actor_model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
-        critic_model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
         actor_model = DistributedDataParallel(actor_model, device_ids=[local_rank])
         critic_model = DistributedDataParallel(critic_model, device_ids=[local_rank])
-    if is_main_process(): rollout_engine.update_policy(actor_model)
+    rollout_engine.update_policy(actor_model)
     
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):

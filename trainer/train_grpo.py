@@ -4,6 +4,7 @@ import sys
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (issue #771)
 import argparse
 import math
 import re
@@ -22,7 +23,7 @@ from transformers import AutoModel
 from model.model_minimind import MiniMindConfig, MiniMindForCausalLM
 from dataset.lm_dataset import RLAIFDataset
 from trainer.trainer_utils import Logger, is_main_process, lm_checkpoint, init_distributed_mode, setup_seed, SkipBatchSampler, init_model, LMForRewardModel
-from trainer.rollout_engine import create_rollout_engine, compute_per_token_logps
+from trainer.rollout_engine import create_rollout_engine
 
 warnings.filterwarnings('ignore')
 
@@ -86,22 +87,21 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_mod
         outputs = rollout_result.output_ids
         completion_ids = rollout_result.completion_ids
         completions = rollout_result.completions
-        old_per_token_logps = rollout_result.per_token_logps.to(args.device)
+        old_per_token_logps = rollout_result.per_token_logps.to(args.device).detach()
+        prompt_lens = rollout_result.prompt_lens.to(args.device)
+        full_mask = (outputs != tokenizer.pad_token_id).long()
+        logp_pos = prompt_lens.unsqueeze(1) - 1 + torch.arange(completion_ids.size(1), device=args.device).unsqueeze(0)
+
+        rewards = calculate_rewards(prompts, completions, reward_model).to(args.device)  # [B*num_gen]
 
         model_unwrapped = model.module if isinstance(model, DistributedDataParallel) else model
         with autocast_ctx:
-            if use_sglang or lm_config.use_moe:
-                res = model_unwrapped(outputs)
-                aux_loss = res.aux_loss if lm_config.use_moe else torch.tensor(0.0, device=args.device)
-                logits = res.logits[:, :-1, :]
-                per_token_logps = F.log_softmax(logits, dim=-1).gather(2, outputs[:, 1:].unsqueeze(-1)).squeeze(-1)[:, -completion_ids.size(1):]
-            else:
-                aux_loss = torch.tensor(0.0, device=args.device)
-                per_token_logps = rollout_result.per_token_logps
-        
+            res = model_unwrapped(outputs, attention_mask=full_mask)
+            aux_loss = res.aux_loss if lm_config.use_moe else torch.tensor(0.0, device=args.device)
+            per_token_logps = F.log_softmax(res.logits[:, :-1, :], dim=-1).gather(2, outputs[:, 1:].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos)
+
         with torch.no_grad():
-            ref_per_token_logps = compute_per_token_logps(ref_model, outputs, completion_ids.size(1))
-        rewards = calculate_rewards(prompts, completions, reward_model).to(args.device)  # [B*num_gen]
+            ref_per_token_logps = F.log_softmax(ref_model(outputs, attention_mask=full_mask).logits[:, :-1, :], dim=-1).gather(2, outputs[:, 1:].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos)
 
         if args.debug_mode and is_main_process() and step % args.debug_interval == 0:
             for i in range(len(prompts)):
@@ -120,13 +120,14 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_mod
 
         grouped_rewards = rewards.view(-1, args.num_generations)  # [B, num_gen]
         mean_r = grouped_rewards.mean(dim=1).repeat_interleave(args.num_generations)  # [B*num_gen]
-        std_r = grouped_rewards.std(dim=1).repeat_interleave(args.num_generations)  # [B*num_gen]
+        std_r = grouped_rewards.std(dim=1, unbiased=False).repeat_interleave(args.num_generations)  # [B*num_gen]
         advantages = (rewards - mean_r) / (std_r + 1e-4)  # [B*num_gen]
 
-        is_eos = completion_ids == tokenizer.eos_token_id  # [B*num_gen, R]
-        eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=args.device)
+        completion_pad_mask = rollout_result.completion_mask.to(args.device).bool()
+        is_eos = (completion_ids == tokenizer.eos_token_id) & completion_pad_mask  # [B*num_gen, R]
+        eos_idx = torch.full((is_eos.size(0),), is_eos.size(1) - 1, dtype=torch.long, device=args.device)
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
-        completion_mask = (torch.arange(is_eos.size(1), device=args.device).expand(is_eos.size(0), -1) <= eos_idx.unsqueeze(1)).int()  # [B*num_gen, R]
+        completion_mask = ((torch.arange(is_eos.size(1), device=args.device).expand(is_eos.size(0), -1) <= eos_idx.unsqueeze(1)) & completion_pad_mask).int()  # [B*num_gen, R]
 
         kl_div = ref_per_token_logps - per_token_logps
         per_token_kl = torch.exp(kl_div) - kl_div - 1  # [B*num_gen, R]
@@ -139,7 +140,7 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_mod
             per_token_loss1 = ratio * advantages.unsqueeze(1)
             per_token_loss2 = clipped_ratio * advantages.unsqueeze(1)
             per_token_loss = -(torch.min(per_token_loss1, per_token_loss2) - args.beta * per_token_kl)
-        policy_loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+        policy_loss = ((per_token_loss * completion_mask).sum(dim=1) / completion_mask.sum(dim=1).clamp(min=1)).mean()
         loss = (policy_loss + aux_loss) / args.accumulation_steps  # scalar
         loss.backward()
 
@@ -149,14 +150,13 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_mod
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
-            if is_main_process() and step % args.save_interval == 0: rollout_engine.update_policy(model)
 
         if step % args.log_interval == 0 or step == iters:
             policy_loss_val = loss.item() * args.accumulation_steps
             current_aux_loss = aux_loss.item()
             avg_reward_val = rewards.mean().item()
             avg_len_val = completion_mask.sum(dim=1).float().mean().item()
-            kl_ref_val = ((ref_per_token_logps - per_token_logps) * completion_mask).sum().item() / completion_mask.sum().item()
+            kl_ref_val = ((ref_per_token_logps - per_token_logps) * completion_mask).sum().item() / max(completion_mask.sum().item(), 1)
             advantages_mean_val = advantages.mean().item()
             advantages_std_val = advantages.std().item()
             current_lr = optimizer.param_groups[0]['lr']
@@ -190,16 +190,17 @@ def grpo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_mod
             model.train()
             del state_dict
 
+        if step % args.save_interval == 0 or step == iters: rollout_engine.update_policy(model)
+
+        del prompt_inputs, outputs, completion_ids, per_token_logps, ref_per_token_logps
+        del completions, rewards, grouped_rewards, mean_r, std_r, advantages, completion_mask, completion_pad_mask, prompt_lens, logp_pos
+
     if step > start_step and step % args.accumulation_steps != 0:
         if args.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
-        if is_main_process() and step % args.save_interval == 0: rollout_engine.update_policy(model)
-
-        del prompt_inputs, outputs, completion_ids, per_token_logps, ref_per_token_logps
-        del completions, rewards, grouped_rewards, mean_r, std_r, advantages, completion_mask
 
 
 if __name__ == "__main__":
@@ -236,8 +237,8 @@ if __name__ == "__main__":
     parser.add_argument("--debug_mode", action="store_true", help="是否打印训练调试采样")
     parser.add_argument("--debug_interval", type=int, default=20, help="debug模式下每隔多少step打印一次采样")
     parser.add_argument("--thinking_ratio", type=float, default=0.9, help="按概率开启thinking（0.0~1.0）")
-    parser.add_argument("--rollout_engine", type=str, default="sglang", choices=["torch", "sglang"], help="rollout引擎类型")
-    parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8996", help="SGLang服务器URL")
+    parser.add_argument("--rollout_engine", type=str, default="torch", choices=["torch", "sglang"], help="rollout引擎类型")
+    parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8998", help="SGLang服务器URL")
     parser.add_argument("--sglang_model_path", type=str, default="../model", help="SGLang tokenizer路径")
     parser.add_argument("--sglang_shared_path", type=str, default="./sglang_ckpt_grpo", help="SGLang共享存储路径")
     args = parser.parse_args()
@@ -311,9 +312,8 @@ if __name__ == "__main__":
         Logger('torch.compile enabled')
         rollout_engine.update_policy(model)
     if dist.is_initialized():
-        model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
         model = DistributedDataParallel(model, device_ids=[local_rank])
-    if is_main_process(): rollout_engine.update_policy(model)
+    rollout_engine.update_policy(model)
     
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):

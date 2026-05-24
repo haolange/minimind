@@ -4,6 +4,7 @@ import sys
 __package__ = "trainer"
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+import datasets  # noqa: F401  # Windows pyarrow/torch DLL conflict workaround (issue #771)
 import re
 import gc
 import json
@@ -267,16 +268,19 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
         prompt_lens = torch.tensor([prompt_len for _, _, prompt_len, _ in packed_samples], device=args.device)
         full_response_masks = torch.tensor([mask + [0] * (max_len - len(mask)) for _, mask, _, _ in packed_samples], device=args.device, dtype=torch.float32)
         old_per_token_logps = torch.tensor([old_logps + [0.0] * ((max_len - 1) - len(old_logps)) for _, _, _, old_logps in packed_samples], device=args.device, dtype=torch.float32)
+        full_mask = (input_ids != tokenizer.pad_token_id).long()
+
+        rewards = calculate_rewards(prompts, completions, gt_batch, tools_batch, args.num_generations, reward_model, device=args.device, turn_outputs_batch=turn_outputs_batch, unfinished_batch=unfinished_batch)
 
         model_unwrapped = model.module if isinstance(model, DistributedDataParallel) else model
         with autocast_ctx:
-            res = model_unwrapped(input_ids)
+            res = model_unwrapped(input_ids, attention_mask=full_mask)
             aux_loss = res.aux_loss if lm_config.use_moe else torch.tensor(0.0, device=args.device)
             logits = res.logits[:, :-1, :]
             per_token_logps = F.log_softmax(logits, dim=-1).gather(2, input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
 
         with torch.no_grad():
-            ref_per_token_logps = compute_per_token_logps(ref_model, input_ids, input_ids.size(1) - 1)
+            ref_per_token_logps = compute_per_token_logps(ref_model, input_ids, input_ids.size(1) - 1, attention_mask=full_mask)
 
         completion_mask = full_response_masks[:, 1:]
         is_eos = (input_ids[:, 1:] == tokenizer.eos_token_id) & completion_mask.bool()
@@ -287,7 +291,6 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
         completion_mask = completion_mask * (pos <= eos_idx.unsqueeze(1)).float()
         token_counts = completion_mask.sum(dim=1)
         valid_rows = token_counts > 0
-        rewards = calculate_rewards(prompts, completions, gt_batch, tools_batch, args.num_generations, reward_model, device=args.device, turn_outputs_batch=turn_outputs_batch, unfinished_batch=unfinished_batch)
 
         if args.debug_mode and is_main_process() and step % args.debug_interval == 0:
             for i in range(len(messages_batch)):
@@ -332,7 +335,6 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
         if step % args.accumulation_steps == 0:
             if args.grad_clip > 0: torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step(); scheduler.step(); optimizer.zero_grad()
-            if is_main_process() and step % args.save_interval == 0: rollout_engine.update_policy(model)
 
         if step % args.log_interval == 0 or step == iters:
             pl = loss.item() * args.accumulation_steps
@@ -359,13 +361,14 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
             model.train()
             del state_dict
 
+        if step % args.save_interval == 0 or step == iters: rollout_engine.update_policy(model)
+
         del per_token_logps, ref_per_token_logps
         del completions, rewards, grouped_rewards, mean_r, std_r, advantages, completion_mask
 
     if last_step > start_step and last_step % args.accumulation_steps != 0:
         if args.grad_clip > 0: torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         optimizer.step(); scheduler.step(); optimizer.zero_grad()
-        if is_main_process() and last_step % args.save_interval == 0: rollout_engine.update_policy(model)
 
 
 if __name__ == "__main__":
@@ -403,7 +406,7 @@ if __name__ == "__main__":
     parser.add_argument("--debug_interval", type=int, default=20, help="调试日志间隔")
     parser.add_argument("--thinking_ratio", type=float, default=0.1, help="按概率开启thinking（0.0~1.0）")
     parser.add_argument("--reward_model_path", type=str, default="../../internlm2-1_8b-reward", help="Reward模型路径")
-    parser.add_argument("--rollout_engine", type=str, default="sglang", choices=["torch", "sglang"], help="rollout引擎类型")
+    parser.add_argument("--rollout_engine", type=str, default="torch", choices=["torch", "sglang"], help="rollout引擎类型")
     parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8998", help="SGLang服务器URL")
     parser.add_argument("--sglang_model_path", type=str, default="../model", help="SGLang tokenizer路径")
     parser.add_argument("--sglang_shared_path", type=str, default="./sglang_ckpt_agent", help="SGLang共享存储路径")
@@ -467,10 +470,10 @@ if __name__ == "__main__":
     if args.use_compile == 1:
         model = torch.compile(model)
         Logger('torch.compile enabled')
+        rollout_engine.update_policy(model)
     if dist.is_initialized():
-        model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
         model = DistributedDataParallel(model, device_ids=[local_rank])
-    if is_main_process(): rollout_engine.update_policy(model)
+    rollout_engine.update_policy(model)
 
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
