@@ -11,6 +11,12 @@
 - [README.md](file://README.md)
 </cite>
 
+## 更新摘要
+**变更内容**
+- 更新了 LoRA 维度检测逻辑部分，反映了从权重矩阵形状比较到属性比较的改进
+- 增强了线性层识别准确性的技术说明
+- 完善了 LoRA 层插入条件的技术细节
+
 ## 目录
 1. [引言](#引言)
 2. [项目结构](#项目结构)
@@ -26,8 +32,10 @@
 ## 引言
 本文件面向 MiniMind LoRA 微调算法的技术文档，系统阐述低秩适应（Low-Rank Adaptation, LoRA）的理论基础与实现原理，涵盖矩阵分解、参数高效微调的核心思想；详细说明 LoRA 层的插入位置、秩大小的选择与适配器权重的初始化策略；解释 LoRA 微调的训练流程（冻结基础模型参数、仅训练适配器参数的优化策略）；提供 LoRA 配置参数的详细说明与调优方法；并包含 LoRA 权重合并、模型部署与性能对比分析。
 
+**更新** 本版本反映了 LoRA 维度检测逻辑的重要改进，从权重矩阵形状比较升级为属性比较，显著提高了线性层识别的准确性。
+
 ## 项目结构
-本项目围绕“从零实现”的理念，将 LoRA 微调贯穿于完整的训练链路中：
+本项目围绕"从零实现"的理念，将 LoRA 微调贯穿于完整的训练链路中：
 - 模型层：定义基础模型结构与 LoRA 适配器的注入逻辑
 - 训练层：提供 LoRA 微调脚本，冻结非 LoRA 参数，仅优化适配器
 - 数据层：提供 SFT 数据集与对话模板处理
@@ -58,16 +66,7 @@ F --> B
 F --> A
 ```
 
-图表来源
-- [model_minimind.py:1-280](file://model/model_minimind.py#L1-L280)
-- [model_lora.py:1-66](file://model/model_lora.py#L1-L66)
-- [train_lora.py:1-184](file://trainer/train_lora.py#L1-L184)
-- [trainer_utils.py:1-177](file://trainer/trainer_utils.py#L1-L177)
-- [lm_dataset.py:1-256](file://dataset/lm_dataset.py#L1-L256)
-- [convert_model.py:1-145](file://scripts/convert_model.py#L1-L145)
-
-章节来源
-- [README.md:765-781](file://README.md#L765-L781)
+**图表来源**
 - [model_minimind.py:1-280](file://model/model_minimind.py#L1-L280)
 - [model_lora.py:1-66](file://model/model_lora.py#L1-L66)
 - [train_lora.py:1-184](file://trainer/train_lora.py#L1-L184)
@@ -82,7 +81,7 @@ F --> A
 - 数据集与对话模板：提供 SFT 数据集，处理多轮对话、工具调用与思考标签
 - 转换与合并脚本：将基础模型与 LoRA 权重合并为新的完整模型权重，便于部署
 
-章节来源
+**章节来源**
 - [model_lora.py:6-33](file://model/model_lora.py#L6-L33)
 - [model_lora.py:35-66](file://model/model_lora.py#L35-L66)
 - [train_lora.py:127-151](file://trainer/train_lora.py#L127-L151)
@@ -122,7 +121,7 @@ T->>L : 合并LoRA增量到基础权重
 T-->>U : 保存完整模型权重
 ```
 
-图表来源
+**图表来源**
 - [train_lora.py:127-151](file://trainer/train_lora.py#L127-L151)
 - [model_minimind.py:229-246](file://model/model_minimind.py#L229-L246)
 - [model_lora.py:21-33](file://model/model_lora.py#L21-L33)
@@ -156,16 +155,16 @@ LoRA --> Linear : "A,B为低秩线性层"
 MiniMindForCausalLM --> Linear : "包含多个线性层"
 ```
 
-图表来源
+**图表来源**
 - [model_lora.py:6-18](file://model/model_lora.py#L6-L18)
 - [model_minimind.py:229-246](file://model/model_minimind.py#L229-L246)
 
-章节来源
+**章节来源**
 - [model_lora.py:6-18](file://model/model_lora.py#L6-L18)
 
 ### LoRA 层插入与 forward 重写
-- 插入条件：遍历模型的所有模块，仅对满足“方阵线性层”（权重形状为方阵）的线性层注入 LoRA
-- 重写策略：显式绑定原 forward 与 LoRA 的 forward，使最终输出为“原输出 + LoRA 增量”
+- **更新** 维度检测逻辑改进：遍历模型的所有模块，使用 `module.in_features == module.out_features` 属性比较来识别方阵线性层，替代之前的权重矩阵形状比较
+- 重写策略：显式绑定原 forward 与 LoRA 的 forward，使最终输出为"原输出 + LoRA 增量"
 - 设计要点：通过 setattr 动态替换模块的 forward，实现对原模型无侵入的增量适配
 
 ```mermaid
@@ -180,10 +179,10 @@ Replace --> Next
 Next --> End(["结束"])
 ```
 
-图表来源
+**图表来源**
 - [model_lora.py:21-33](file://model/model_lora.py#L21-L33)
 
-章节来源
+**章节来源**
 - [model_lora.py:21-33](file://model/model_lora.py#L21-L33)
 
 ### LoRA 训练流程与参数冻结
@@ -211,11 +210,11 @@ T-->>T : 保存LoRA权重
 end
 ```
 
-图表来源
+**图表来源**
 - [train_lora.py:127-151](file://trainer/train_lora.py#L127-L151)
 - [trainer_utils.py:63-116](file://trainer/trainer_utils.py#L63-L116)
 
-章节来源
+**章节来源**
 - [train_lora.py:127-151](file://trainer/train_lora.py#L127-L151)
 - [trainer_utils.py:63-116](file://trainer/trainer_utils.py#L63-L116)
 
@@ -231,11 +230,11 @@ Apply --> Merge["合并LoRA增量到基础权重"]
 Merge --> Save(["保存完整模型权重"])
 ```
 
-图表来源
+**图表来源**
 - [model_lora.py:35-66](file://model/model_lora.py#L35-L66)
 - [convert_model.py:105-112](file://scripts/convert_model.py#L105-L112)
 
-章节来源
+**章节来源**
 - [model_lora.py:35-66](file://model/model_lora.py#L35-L66)
 - [convert_model.py:105-112](file://scripts/convert_model.py#L105-L112)
 
@@ -244,7 +243,7 @@ Merge --> Save(["保存完整模型权重"])
 - 标签处理：对空思考标签按概率移除，提高训练稳定性
 - 模板生成：将对话历史与当前问题拼接为模型输入，生成标签序列
 
-章节来源
+**章节来源**
 - [lm_dataset.py:58-119](file://dataset/lm_dataset.py#L58-L119)
 
 ## 依赖关系分析
@@ -266,7 +265,7 @@ Convert["scripts/convert_model.py"] --> LoRA
 Convert --> Model
 ```
 
-图表来源
+**图表来源**
 - [train_lora.py:16-19](file://trainer/train_lora.py#L16-L19)
 - [convert_model.py:10-12](file://scripts/convert_model.py#L10-L12)
 - [model_minimind.py:10-45](file://model/model_minimind.py#L10-L45)
@@ -274,7 +273,7 @@ Convert --> Model
 - [trainer_utils.py:1-17](file://trainer/trainer_utils.py#L1-L17)
 - [lm_dataset.py:1-10](file://dataset/lm_dataset.py#L1-L10)
 
-章节来源
+**章节来源**
 - [train_lora.py:16-19](file://trainer/train_lora.py#L16-L19)
 - [convert_model.py:10-12](file://scripts/convert_model.py#L10-L12)
 
@@ -285,7 +284,7 @@ Convert --> Model
 - 分布式与断点续训：支持多卡训练与自动恢复，提升训练稳定性与效率
 - 推理部署：通过权重合并生成完整模型权重，便于在多种推理引擎中部署
 
-章节来源
+**章节来源**
 - [train_lora.py:131-136](file://trainer/train_lora.py#L131-L136)
 - [train_lora.py:113-116](file://trainer/train_lora.py#L113-L116)
 - [README.md:765-781](file://README.md#L765-L781)
@@ -303,13 +302,15 @@ Convert --> Model
   - 检查本地 rank 与设备设置，确保 CUDA 可用
   - 断点续训时注意 GPU 数量变化导致的 step 转换
 
-章节来源
+**章节来源**
 - [train_lora.py:138-146](file://trainer/train_lora.py#L138-L146)
 - [model_lora.py:35-53](file://model/model_lora.py#L35-L53)
 - [trainer_utils.py:107-116](file://trainer/trainer_utils.py#L107-L116)
 
 ## 结论
-MiniMind 的 LoRA 微调实现遵循“参数高效微调”的核心思想，通过低秩分解与适配器初始化策略，仅训练少量参数即可完成领域适配。训练脚本提供完整的冻结参数、混合精度、分布式与断点续训能力；转换脚本支持 LoRA 权重合并与模型格式转换，便于部署与推理。该实现为理解 LoRA 的理论与实践提供了清晰、可复现的参考路径。
+MiniMind 的 LoRA 微调实现遵循"参数高效微调"的核心思想，通过低秩分解与适配器初始化策略，仅训练少量参数即可完成领域适配。训练脚本提供完整的冻结参数、混合精度、分布式与断点续训能力；转换脚本支持 LoRA 权重合并与模型格式转换，便于部署与推理。该实现为理解 LoRA 的理论与实践提供了清晰、可复现的参考路径。
+
+**更新** 最新的维度检测逻辑改进进一步提升了线性层识别的准确性，确保 LoRA 适配器仅被正确地注入到合适的线性层中，提高了整个微调流程的可靠性。
 
 ## 附录
 
@@ -333,6 +334,6 @@ MiniMind 的 LoRA 微调实现遵循“参数高效微调”的核心思想，�
   - 控制权重保存频率与日志输出频率，便于监控与恢复
   - 建议：按训练时长与显存压力合理设置
 
-章节来源
+**章节来源**
 - [train_lora.py:77-101](file://trainer/train_lora.py#L77-L101)
 - [train_lora.py:113-116](file://trainer/train_lora.py#L113-L116)
