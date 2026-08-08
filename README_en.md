@@ -765,16 +765,16 @@ Its core idea is to introduce low-rank incremental branches alongside the origin
 ```bash
 # train_lora.py can usually be completed fairly quickly even on CPU
 # Method 1
-torchrun --nproc_per_node 1 train_lora.py
+cd trainer && torchrun --nproc_per_node 1 train_lora.py
 # Method 2
-python train_lora.py
+cd trainer && python train_lora.py
 ```
 
 > The trained model weight files are saved by default every `save_interval steps` as: `lora_xxx_*.pth` (* is the specific model dimension, each save overwrites the previous file)
 
 
 LoRA is well-suited for handling problems like "how to let the model quickly adapt to private domains or vertical scenarios while preserving general capabilities as much as possible." For example, when the base model lacks medical knowledge, a medical-oriented LoRA weight layer can be stacked on top of the original model to achieve better domain performance at relatively small cost.
-Usually you only need to prepare multi-turn dialogue format data in the same way, place it in `lora_xxx.jsonl`, and then run `python train_lora.py` to obtain new `LoRA` model weights.
+Usually you only need to prepare multi-turn dialogue format data in the same way, place it in `lora_xxx.jsonl`, and then run `cd trainer && python train_lora.py` from the repository root to obtain new `LoRA` model weights.
 
 Example 1: Vertical domain data
 
@@ -1926,26 +1926,16 @@ Thanks also to the following papers and projects:
 
 ## 🫶Supporters
 
-<a href="https://github.com/jingyaogong/minimind/stargazers">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-      <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=jingyaogong&repo=minimind"/>
-      <img alt="Star poster" src="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-    </picture>
-</a>
-
-<a href="https://github.com/jingyaogong/minimind/network/members">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-      <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind"/>
-      <img alt="Fork poster" src="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-    </picture>
-</a>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
+  <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind"/>
+  <img alt="Fork poster" src="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
+</picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jingyaogong/minimind&type=Date&theme=dark"/>
-  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jingyaogong/minimind&type=Date"/>
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=jingyaogong/minimind&type=Date&theme=dark"/>
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=jingyaogong/minimind&type=date&theme=dark&legend=top-left&sealed_token=DK6jy_uvw2AHIK0S4VZLf6snWIQ06jGzz3QiwVmXBGDvickcQgJGSdazdGxjRQZuj8Hr3GfS_REB9ohoK8NWVsmukeOQiT4soChw3_19yyPVwvWzBp66yMYWlvOYy9sv60cMSntByiUTcyp4MrRiMm1JD1MSC8NJ-Z9qhR9uJGl2AU7w-OGlyKQzN7Xa"/>
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=jingyaogong/minimind&type=date&legend=top-left&sealed_token=DK6jy_uvw2AHIK0S4VZLf6snWIQ06jGzz3QiwVmXBGDvickcQgJGSdazdGxjRQZuj8Hr3GfS_REB9ohoK8NWVsmukeOQiT4soChw3_19yyPVwvWzBp66yMYWlvOYy9sv60cMSntByiUTcyp4MrRiMm1JD1MSC8NJ-Z9qhR9uJGl2AU7w-OGlyKQzN7Xa"/>
+  <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=jingyaogong/minimind&type=date&legend=top-left&sealed_token=DK6jy_uvw2AHIK0S4VZLf6snWIQ06jGzz3QiwVmXBGDvickcQgJGSdazdGxjRQZuj8Hr3GfS_REB9ohoK8NWVsmukeOQiT4soChw3_19yyPVwvWzBp66yMYWlvOYy9sv60cMSntByiUTcyp4MrRiMm1JD1MSC8NJ-Z9qhR9uJGl2AU7w-OGlyKQzN7Xa"/>
 </picture>
 
 ## 🎉 MiniMind Related Achievements

@@ -12,7 +12,6 @@ import warnings
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from transformers import AutoTokenizer
 from contextlib import nullcontext
 from torch import optim, nn
 from torch.nn.parallel import DistributedDataParallel
@@ -76,7 +75,7 @@ def calculate_rewards(prompts, responses, reward_model):
     return rewards
 
 
-def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, start_step=0, wandb=None, use_sglang=False):
+def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, start_step=0, wandb=None):
     actor_model.train()
     critic_model.train()
     grad_accum_step = 0
@@ -174,10 +173,24 @@ def ppo_train_epoch(epoch, loader, iters, rollout_engine, ref_model, actor_sched
                 with autocast_ctx:
                     res = actor_unwrapped(input_ids=gen_out[inds], attention_mask=full_mask[inds])
                     aux_loss = res.aux_loss if lm_config.use_moe else torch.tensor(0.0, device=args.device)
+                    # 在 autocast 内计算 log_softmax，避免直接对 fp16/bf16 logits
+                    # 计算造成额外数值偏差。
+                    mb_resp_logp = F.log_softmax(res.logits[:, :-1], dim=-1).gather(2, labels[inds].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos[inds])
 
-                mb_resp_logp = F.log_softmax(res.logits[:, :-1], dim=-1).gather(2, labels[inds].unsqueeze(-1)).squeeze(-1).gather(1, logp_pos[inds])
-                
                 log_ratio = mb_resp_logp - old_resp_logp[inds]
+
+                # 可开关的诊断：观察首轮首个 minibatch 的 mb 与 old logp 差异。
+                if args.debug_log_ratio and ppo_epoch == 0 and i == 0 and is_main_process():
+                    _lr = log_ratio.detach()
+                    _m = resp_policy_mask[inds].bool()
+                    if _m.any():
+                        _lrv = _lr[_m]
+                        Logger(f"[DBG log_ratio] step={step} max|lr|={_lrv.abs().max().item():.6e} "
+                               f"mean|lr|={_lrv.abs().mean().item():.6e} "
+                               f"ratio_max={torch.exp(_lrv).max().item():.6f} "
+                               f"ratio_min={torch.exp(_lrv).min().item():.6f} "
+                               f"dropout={getattr(lm_config, 'dropout', None)} "
+                               f"training={actor_unwrapped.training}")
                 approx_kl = (0.5 * (log_ratio ** 2) * resp_policy_mask[inds]).sum() / resp_policy_mask[inds].sum().clamp(min=1)
                 
                 # 同步各卡的 approx_kl，防止某卡 break 而其它卡继续导致 DDP 死锁
@@ -331,6 +344,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     parser.add_argument("--debug_mode", action="store_true", help="是否打印训练调试采样")
     parser.add_argument("--debug_interval", type=int, default=20, help="debug模式下每隔多少step打印一次采样")
+    parser.add_argument("--debug_log_ratio", action="store_true", help="打印首轮首个minibatch的log_ratio差异量级，用于核查ratio≈1是否成立")
     parser.add_argument("--thinking_ratio", type=float, default=0.9, help="按概率开启thinking（0.0~1.0）")
     parser.add_argument("--rollout_engine", type=str, default="torch", choices=["torch", "sglang"], help="rollout引擎类型")
     parser.add_argument("--sglang_base_url", type=str, default="http://localhost:8998", help="SGLang服务器URL")
@@ -427,9 +441,9 @@ if __name__ == "__main__":
         loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
         if skip > 0: 
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            ppo_train_epoch(epoch, loader, len(loader) + skip, rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, start_step, wandb, use_sglang = (args.rollout_engine == "sglang"))
+            ppo_train_epoch(epoch, loader, len(loader) + skip, rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, start_step, wandb)
         else:
-            ppo_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, 0, wandb, use_sglang = (args.rollout_engine == "sglang"))
+            ppo_train_epoch(epoch, loader, len(loader), rollout_engine, ref_model, actor_scheduler, critic_scheduler, reward_model, 0, wandb)
     
     # ========== 9. 清理分布进程 ==========
     if dist.is_initialized():

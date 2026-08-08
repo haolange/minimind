@@ -765,16 +765,16 @@ LoRA 是一种常见的参数高效微调（Parameter-Efficient Fine-Tuning, PEF
 ```bash
 # train_lora.py 在 CPU 上通常也能比较轻快地完成
 # 方式1
-torchrun --nproc_per_node 1 train_lora.py
+cd trainer && torchrun --nproc_per_node 1 train_lora.py
 # 方式2
-python train_lora.py
+cd trainer && python train_lora.py
 ```
 
 > 训练后的模型权重文件默认每隔`save_interval步`保存为: `lora_xxx_*.pth`（*为模型具体dimension，每次保存时新文件会覆盖旧文件）
 
 
 LoRA 很适合处理“如何在尽量保留通用能力的前提下，让模型快速适应私有领域或垂直场景”这类问题。例如基础模型医学知识不足时，就可以在原有模型之上叠加一层面向医疗场景的 LoRA 权重，以较小代价获得更好的领域表现。
-通常只需要准备同样的多轮对话格式数据，放置到 `lora_xxx.jsonl`，再执行 `python train_lora.py`，即可得到新的 `LoRA` 模型权重。
+通常只需要准备同样的多轮对话格式数据，放置到 `lora_xxx.jsonl`，再从仓库根目录执行 `cd trainer && python train_lora.py`，即可得到新的 `LoRA` 模型权重。
 
 例1：垂域数据
 
@@ -1926,26 +1926,16 @@ python llmexport.py --path /path/to/模型路径/ --export mnn --hqq --dst_path 
 
 ## 🫶支持者
 
-<a href="https://github.com/jingyaogong/minimind/stargazers">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-      <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=jingyaogong&repo=minimind"/>
-      <img alt="Star poster" src="https://bytecrank.com/nastyox/reporoster/php/stargazersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-    </picture>
-</a>
-
-<a href="https://github.com/jingyaogong/minimind/network/members">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-      <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind"/>
-      <img alt="Fork poster" src="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
-    </picture>
-</a>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
+  <source media="(prefers-color-scheme: light)" srcset="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind"/>
+  <img alt="Fork poster" src="https://bytecrank.com/nastyox/reporoster/php/forkersSVG.php?user=jingyaogong&repo=minimind&theme=dark"/>
+</picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=jingyaogong/minimind&type=Date&theme=dark"/>
-  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=jingyaogong/minimind&type=Date"/>
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=jingyaogong/minimind&type=Date&theme=dark"/>
+  <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=jingyaogong/minimind&type=date&theme=dark&legend=top-left&sealed_token=DK6jy_uvw2AHIK0S4VZLf6snWIQ06jGzz3QiwVmXBGDvickcQgJGSdazdGxjRQZuj8Hr3GfS_REB9ohoK8NWVsmukeOQiT4soChw3_19yyPVwvWzBp66yMYWlvOYy9sv60cMSntByiUTcyp4MrRiMm1JD1MSC8NJ-Z9qhR9uJGl2AU7w-OGlyKQzN7Xa"/>
+  <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=jingyaogong/minimind&type=date&legend=top-left&sealed_token=DK6jy_uvw2AHIK0S4VZLf6snWIQ06jGzz3QiwVmXBGDvickcQgJGSdazdGxjRQZuj8Hr3GfS_REB9ohoK8NWVsmukeOQiT4soChw3_19yyPVwvWzBp66yMYWlvOYy9sv60cMSntByiUTcyp4MrRiMm1JD1MSC8NJ-Z9qhR9uJGl2AU7w-OGlyKQzN7Xa"/>
+  <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=jingyaogong/minimind&type=date&legend=top-left&sealed_token=DK6jy_uvw2AHIK0S4VZLf6snWIQ06jGzz3QiwVmXBGDvickcQgJGSdazdGxjRQZuj8Hr3GfS_REB9ohoK8NWVsmukeOQiT4soChw3_19yyPVwvWzBp66yMYWlvOYy9sv60cMSntByiUTcyp4MrRiMm1JD1MSC8NJ-Z9qhR9uJGl2AU7w-OGlyKQzN7Xa"/>
 </picture>
 
 ## 🎉 MiniMind 相关成果
