@@ -14,6 +14,13 @@
 - [requirements.txt](file://requirements.txt)
 </cite>
 
+## 更新摘要
+**所做更改**
+- 增强了API健壮性，改进了对空响应和过滤响应的错误处理
+- 改进了流式响应处理，增加了对缺失chunk choices和None delta对象的检查
+- 在生成线程中增加了异常处理，通过队列机制正确传播错误
+- 更新了客户端示例以更好地处理边界情况
+
 ## 目录
 1. [简介](#简介)
 2. [项目结构](#项目结构)
@@ -35,6 +42,8 @@
 - 基于 Transformers 的本地推理与可选 LoRA 微调
 
 该服务可用于对接 FastGPT、Open-WebUI 等第三方前端，或通过 Python 客户端直接调用。
+
+**更新** 增强了API健壮性，改进了错误处理和流式响应处理机制。
 
 ## 项目结构
 - scripts：服务端与客户端示例
@@ -81,7 +90,7 @@ A --> H
 - [tokenizer.json:1](file://model/tokenizer.json#L1)
 
 章节来源
-- [serve_openai_api.py:1-246](file://scripts/serve_openai_api.py#L1-L246)
+- [serve_openai_api.py:1-253](file://scripts/serve_openai_api.py#L1-L253)
 - [model_minimind.py:1-280](file://model/model_minimind.py#L1-L280)
 - [model_lora.py:1-66](file://model/model_lora.py#L1-L66)
 - [tokenizer_config.json:1-335](file://model/tokenizer_config.json#L1-L335)
@@ -100,12 +109,14 @@ A --> H
 - generate_stream_response
   - 构造提示词、调用模型生成、分片产出 delta 内容、结束时发送 finish_reason/tool_calls
 
+**更新** 增强了错误处理机制，包括生成线程中的异常捕获和队列错误传播。
+
 章节来源
 - [serve_openai_api.py:50-68](file://scripts/serve_openai_api.py#L50-L68)
 - [serve_openai_api.py:71-81](file://scripts/serve_openai_api.py#L71-L81)
 - [serve_openai_api.py:83-102](file://scripts/serve_openai_api.py#L83-L102)
-- [serve_openai_api.py:105-168](file://scripts/serve_openai_api.py#L105-L168)
-- [serve_openai_api.py:171-227](file://scripts/serve_openai_api.py#L171-L227)
+- [serve_openai_api.py:105-176](file://scripts/serve_openai_api.py#L105-L176)
+- [serve_openai_api.py:178-235](file://scripts/serve_openai_api.py#L178-L235)
 
 ## 架构总览
 OpenAI 兼容服务的整体流程如下：
@@ -113,6 +124,8 @@ OpenAI 兼容服务的整体流程如下：
 - 服务端将 messages 渲染为 chat template，截断到 max_tokens
 - 非流式：一次性生成并解析思维链/工具调用
 - 流式：通过 TextStreamer 与队列，边生成边输出 delta，直至结束
+
+**更新** 增强了错误处理机制，确保异常情况能够正确传播到客户端。
 
 ```mermaid
 sequenceDiagram
@@ -131,11 +144,12 @@ Str-->>Out : data : {delta : {content|reasoning_content}}
 API-->>Client : 流式响应
 API->>API : parse_response(full_text)
 API-->>Client : {delta : {tool_calls|finish_reason}}
+Note over Gen : 异常时通过队列传播错误
 ```
 
 图表来源
-- [serve_openai_api.py:171-227](file://scripts/serve_openai_api.py#L171-L227)
-- [serve_openai_api.py:105-168](file://scripts/serve_openai_api.py#L105-L168)
+- [serve_openai_api.py:178-235](file://scripts/serve_openai_api.py#L178-L235)
+- [serve_openai_api.py:105-176](file://scripts/serve_openai_api.py#L105-L176)
 - [serve_openai_api.py:71-81](file://scripts/serve_openai_api.py#L71-L81)
 
 ## 详细组件分析
@@ -147,8 +161,10 @@ API-->>Client : {delta : {tool_calls|finish_reason}}
   - 非流式：一次返回完整消息与 finish_reason
   - 流式：SSE，逐块返回 delta，最后发送 finish_reason/tool_calls
 
+**更新** 增强了异常处理，确保HTTP级别的错误能够正确返回给客户端。
+
 章节来源
-- [serve_openai_api.py:171-227](file://scripts/serve_openai_api.py#L171-L227)
+- [serve_openai_api.py:178-235](file://scripts/serve_openai_api.py#L178-L235)
 
 ### ChatRequest 模型与参数
 - 字段与默认值
@@ -177,28 +193,36 @@ API-->>Client : {delta : {tool_calls|finish_reason}}
   - 主线程从队列取文本，按思维链结束标志拆分 content/reasoning_content
   - 逐块输出 delta，结束后解析工具调用并发送 finish_reason
 
+**更新** 增强了流式传输的错误处理：
+- 生成线程中的异常被捕获并通过队列传播
+- 主线程正确处理错误字典类型的队列项
+- 确保异常情况下仍能正常结束流式传输
+
 ```mermaid
 flowchart TD
 Start(["开始"]) --> Prompt["渲染模板并截断到 max_tokens"]
 Prompt --> Init["初始化队列与 CustomStreamer"]
 Init --> Spawn["启动生成线程"]
 Spawn --> Loop{"从队列取文本"}
-Loop --> |未结束| Emit["累计 full_text 并按思维链标志拆分"]
-Emit --> Yield["yield delta: content 或 reasoning_content"]
+Loop --> |未结束| CheckType{"检查数据类型"}
+CheckType --> |错误字典| EmitError["yield 错误信息"]
+CheckType --> |文本| Accumulate["累计 full_text 并按思维链标志拆分"]
+Accumulate --> Yield["yield delta: content 或 reasoning_content"]
 Yield --> Loop
 Loop --> |结束| Parse["parse_response(full_text) 解析工具调用"]
 Parse --> Finish["yield finish_reason 或 tool_calls"]
 Finish --> End(["结束"])
+EmitError --> Loop
 ```
 
 图表来源
-- [serve_openai_api.py:105-168](file://scripts/serve_openai_api.py#L105-L168)
+- [serve_openai_api.py:105-176](file://scripts/serve_openai_api.py#L105-L176)
 - [serve_openai_api.py:71-81](file://scripts/serve_openai_api.py#L71-L81)
 - [serve_openai_api.py:83-102](file://scripts/serve_openai_api.py#L83-L102)
 
 章节来源
 - [serve_openai_api.py:71-81](file://scripts/serve_openai_api.py#L71-L81)
-- [serve_openai_api.py:105-168](file://scripts/serve_openai_api.py#L105-L168)
+- [serve_openai_api.py:105-176](file://scripts/serve_openai_api.py#L105-L176)
 
 ### 思维链（Thinking）与工具调用（Tool Call）处理
 - 思维链
@@ -213,7 +237,7 @@ Finish --> End(["结束"])
 
 章节来源
 - [serve_openai_api.py:83-102](file://scripts/serve_openai_api.py#L83-L102)
-- [serve_openai_api.py:162-168](file://scripts/serve_openai_api.py#L162-L168)
+- [serve_openai_api.py:169-172](file://scripts/serve_openai_api.py#L169-L172)
 - [eval_toolcall.py:70-96](file://scripts/eval_toolcall.py#L70-L96)
 
 ### 模型与分词器
@@ -237,12 +261,20 @@ Finish --> End(["结束"])
 - Python 客户端示例
   - 使用 openai.OpenAI，base_url 指向本服务
   - 支持 stream=True，逐块读取 delta.content 与 delta.tool_calls
+  - **更新** 增强了对空响应和过滤响应的检查
+  - **更新** 增加了对缺失 chunk choices 和 None delta 对象的处理
 - Web UI
   - Streamlit demo 展示工具与思考内容的格式化显示
   - 支持多轮对话、工具选择与思考折叠
 
+**更新** 客户端示例现在包含更健壮的边界情况处理：
+- 检查 response.choices 是否存在且不为空
+- 检查 message 是否为 None
+- 在处理流式响应时检查 chunk.choices 是否存在
+- 检查 delta 对象是否为 None
+
 章节来源
-- [chat_api.py:1-40](file://scripts/chat_api.py#L1-L40)
+- [chat_api.py:1-47](file://scripts/chat_api.py#L1-L47)
 - [web_demo.py:106-195](file://scripts/web_demo.py#L106-L195)
 
 ## 依赖关系分析
@@ -293,21 +325,38 @@ C["chat_api.py"] --> OAI["openai SDK"]
 ## 故障排除指南
 - 500 错误
   - 服务端捕获异常并返回错误信息，检查日志定位具体异常
+  - **更新** 现在包括生成线程中的异常处理和HTTP级别的错误处理
 - 流式输出为空
   - 确认 CustomStreamer 是否正确 put 文本，队列是否被提前关闭
+  - **更新** 检查是否有错误字典类型的队列项被正确处理
 - 工具调用未识别
   - 确认 JSON 工具调用块格式正确，且包含 name 与 arguments
 - 思维链未显示
   - 确认 chat_template_kwargs.enable_thinking/open_thinking 已开启
 - 分词器不兼容
   - 确认使用与服务端一致的 tokenizer_config.json/tokenizer.json
+- 客户端连接问题
+  - **更新** 客户端现在更好地处理空响应和过滤响应
+  - **更新** 增加了对缺失 chunk choices 和 None delta 的检查
+
+**更新** 新增故障排除项：
+- 生成线程异常：检查队列中是否有错误字典类型的项
+- 流式传输中断：确认异常情况下队列是否正常结束
+- 客户端崩溃：检查客户端是否正确处理边界情况
 
 章节来源
-- [serve_openai_api.py:226-227](file://scripts/serve_openai_api.py#L226-L227)
-- [serve_openai_api.py:167-168](file://scripts/serve_openai_api.py#L167-L168)
+- [serve_openai_api.py:174-176](file://scripts/serve_openai_api.py#L174-L176)
+- [serve_openai_api.py:233-235](file://scripts/serve_openai_api.py#L233-L235)
+- [chat_api.py:23-47](file://scripts/chat_api.py#L23-L47)
 
 ## 结论
 本项目提供了一个与 OpenAI API 兼容的 FastAPI 服务，支持流式传输、思维链与工具调用，具备良好的可扩展性与易用性。通过 Transformers 与自研模型结合，既满足本地推理需求，又可对接第三方前端与 SDK。
+
+**更新** 最新的增强功能包括：
+- 增强的API健壮性和错误处理机制
+- 改进的流式响应处理，支持缺失数据和边界情况
+- 完善的异常传播机制，确保错误能够正确传递到客户端
+- 更健壮的客户端示例，能够更好地处理各种异常情况
 
 ## 附录
 
@@ -336,13 +385,15 @@ C["chat_api.py"] --> OAI["openai SDK"]
   - Body 同上，但 stream: true
 
 - Python 客户端（OpenAI SDK）
-  - 参考 [chat_api.py:1-40](file://scripts/chat_api.py#L1-L40)
+  - 参考 [chat_api.py:1-47](file://scripts/chat_api.py#L1-L47)
 
 - 第三方 SDK 集成
   - 通过 base_url 指向本服务，其余 OpenAI SDK 使用方式一致
 
+**更新** 客户端示例现在包含更好的错误处理和边界情况检查。
+
 章节来源
-- [chat_api.py:1-40](file://scripts/chat_api.py#L1-L40)
+- [chat_api.py:1-47](file://scripts/chat_api.py#L1-L47)
 
 ### 参数说明与取值范围
 - temperature：采样温度，越小越确定
@@ -366,3 +417,34 @@ C["chat_api.py"] --> OAI["openai SDK"]
 章节来源
 - [serve_openai_api.py:83-102](file://scripts/serve_openai_api.py#L83-L102)
 - [eval_toolcall.py:70-96](file://scripts/eval_toolcall.py#L70-L96)
+
+### 错误处理机制
+**新增章节** 详细说明系统的错误处理机制：
+
+- 生成线程异常处理
+  - 在 _generate 函数中使用 try-except 捕获所有异常
+  - 异常信息通过队列以字典形式 {"error": str(e)} 传播
+  - 确保异常不会导致程序崩溃
+
+- 主线程错误处理
+  - 检查队列项类型，区分文本和错误字典
+  - 正确处理错误字典并传递给客户端
+  - 确保异常情况下仍能正常结束流式传输
+
+- HTTP级别错误处理
+  - 在路由函数中使用 try-except 捕获所有异常
+  - 使用 HTTPException 返回适当的HTTP状态码
+  - 提供详细的错误信息给客户端
+
+- 客户端健壮性
+  - 检查 response.choices 是否存在且不为空
+  - 检查 message 是否为 None
+  - 在处理流式响应时检查 chunk.choices 是否存在
+  - 检查 delta 对象是否为 None
+
+章节来源
+- [serve_openai_api.py:113-129](file://scripts/serve_openai_api.py#L113-L129)
+- [serve_openai_api.py:136-143](file://scripts/serve_openai_api.py#L136-L143)
+- [serve_openai_api.py:174-176](file://scripts/serve_openai_api.py#L174-L176)
+- [serve_openai_api.py:233-235](file://scripts/serve_openai_api.py#L233-L235)
+- [chat_api.py:23-47](file://scripts/chat_api.py#L23-L47)
